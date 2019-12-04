@@ -25,9 +25,10 @@ class RedisKeyedVectors:
     for-distributed-computations-c5065cbaa02f
     """
 
-    def __init__(self, uri, key='', max_lru_cache_size=1024):
+    def __init__(self, uri, key='', max_lru_cache_size=1024, idf_weighting='naive'):
         self.word_vec = lru_cache(maxsize=max_lru_cache_size)(self.word_vec)
         self.key = f'w2v_{key}'
+        self.idf_weighting = idf_weighting
 
         try:
             host, port, database = self._parse_uri(uri)
@@ -77,15 +78,24 @@ class RedisKeyedVectors:
         """
         return self._redis.hexists(self.key, word)
 
-    def load_keyed_vectors_into_redis(self, model_path):
+    def load_keyed_vectors_into_redis(self, model_path, idf_weighting='naive'):
         """
         This function loops over all available words in the loaded word2vec keyed vectors model
         and loads them into the redis instance.
         """
         model = KeyedVectors.load(model_path, mmap='r')
+        nr_train_tokens = sum(token_vocab.count for token_vocab in model.vocab.values())
+        self.idf_weighting = idf_weighting
         try:
             for word in tqdm(list(model.vocab.keys())):
-                idf_normalized_vector = model[word] / model.vocab[word].count
+                if self.idf_weighting == 'naive':
+                    idf = model.vocab[word].count
+                elif self.idf_weighting == 'log':
+                    idf = np.log(nr_train_tokens / (model.vocab[word].count + 1)) + 1
+                else:
+                    raise ValueError(f'idf_weighting "{self.idf_weighting}" not available; use '
+                                     f'"naive" or "log"')
+                idf_normalized_vector = model[word] / idf
                 self._redis.hset(self.key, word, pickle.dumps(idf_normalized_vector))
         except RedisError as exception:
             raise RedisKeyedVectorException(f'RedisError while trying to load model {model} '
